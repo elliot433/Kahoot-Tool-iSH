@@ -227,30 +227,27 @@ def get_session(pin: str):
             return None, None, None, None, "Game not found or not started"
         if r.status_code != 200:
             return None, None, None, None, f"HTTP {r.status_code}"
-        raw_token    = r.headers.get("x-authtoken", "")
         data         = r.json()
         challenge_js = data.get("challenge", "")
-
-        # Decode token: base64 → XOR with solved challenge
-        try:
-            decoded = base64.b64decode(raw_token).decode("utf-8")
-        except Exception:
-            decoded = raw_token
-        key   = solve_challenge(challenge_js) if challenge_js else ""
-        token = xor_decode(decoded, key) if key else decoded
-
-        # Kahoot routes to a specific game server — grab from response headers
         gameserver    = r.headers.get("x-kahoot-gameserver", "")
         session_token = r.headers.get("x-kahoot-session-token", "")
 
-        # WebSocket path uses the PIN, not liveGameId
-        live_game_id = pin
+        # Current Kahoot protocol: challenge result IS the WebSocket token directly.
+        # x-authtoken is no longer returned by the API.
+        token = solve_challenge(challenge_js) if challenge_js else ""
 
-        # Token priority:
-        # 1. Challenge-derived XOR token (most reliable when challenge is present)
-        # 2. session_token fallback (when challenge is absent/unsolved)
-        if not key and session_token:
+        # Fallback 1: session_token header (when challenge solving fails)
+        if not token:
             token = session_token
+
+        # Fallback 2: legacy x-authtoken XOR (old API, kept for safety)
+        if not token:
+            raw_token = r.headers.get("x-authtoken", "")
+            try:    decoded = base64.b64decode(raw_token).decode("utf-8")
+            except: decoded = raw_token
+            token = decoded
+
+        live_game_id = pin
 
         # Build WebSocket base URL from gameserver header
         if gameserver:
@@ -268,17 +265,8 @@ def get_session(pin: str):
 
         cookies = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
 
-        # Debug block — always shown so we can diagnose 403
-        print(f"  {DIM}[debug] challenge_js : {'yes ('+str(len(challenge_js))+' chars)' if challenge_js else 'NONE'}{R}")
-        if challenge_js:
-            print(f"  {DIM}[debug] challenge txt: {challenge_js.replace(chr(10),' ')}{R}")
-        print(f"  {DIM}[debug] challenge key: {repr(key[:16]) if key else 'EMPTY'}{R}")
-        print(f"  {DIM}[debug] raw_token     : {raw_token[:20]}…{R}")
-        print(f"  {DIM}[debug] session_token : {session_token[:20] if session_token else 'NONE'}{R}")
-        print(f"  {DIM}[debug] token used    : {token[:20]}…{R}")
-        print(f"  {DIM}[debug] gameserver    : {gameserver or 'NONE (using kahoot.it)'}{R}")
-        print(f"  {DIM}[debug] session_id    : {live_game_id}{R}")
-        print(f"  {DIM}[debug] WS URL        : {ws_base}/cometd/{live_game_id}/{token[:12]}…{R}")
+        src = "challenge" if (challenge_js and token) else ("session_token" if session_token else "none")
+        print(f"  {DIM}token source: {src}  →  {token[:16]}…  WS: {ws_base}/cometd/{live_game_id}/{token[:8]}…{R}")
 
         return token, live_game_id, ws_base, cookies, None
     except Exception as e:
