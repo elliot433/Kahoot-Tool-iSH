@@ -97,22 +97,26 @@ def xor_decode(token: str, key: str) -> str:
     return "".join(chr(ord(a) ^ ord(key[i % len(key)])) for i, a in enumerate(token))
 
 # ── Session ───────────────────────────────────────────────────────────────────
+_session = requests.Session()   # keeps cookies across requests
+
 def get_session(pin: str):
     ts = int(time.time() * 1000)
     try:
-        r = requests.get(SESSION_URL.format(pin, ts), headers=HEADERS, timeout=10)
+        r = _session.get(SESSION_URL.format(pin, ts), headers=HEADERS, timeout=10)
         if r.status_code == 404:
-            return None, None, None, "Game not found or not started"
+            return None, None, None, None, "Game not found or not started"
         if r.status_code != 200:
-            return None, None, None, f"HTTP {r.status_code}"
+            return None, None, None, None, f"HTTP {r.status_code}"
         raw_token = r.headers.get("x-authtoken", "")
         data = r.json()
         challenge_js = data.get("challenge", "")
         token = xor_decode(raw_token, solve_challenge(challenge_js)) if challenge_js else raw_token
         kahoot_id = data.get("kahootId", data.get("quizId", ""))
-        return token, str(data.get("sessionId", pin)), kahoot_id, None
+        # Build cookie string to pass to WebSocket
+        cookies = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
+        return token, str(data.get("sessionId", pin)), kahoot_id, cookies, None
     except Exception as e:
-        return None, None, None, str(e)
+        return None, None, None, None, str(e)
 
 # ── Answer Fetcher ────────────────────────────────────────────────────────────
 def fetch_answers(kahoot_id: str) -> dict:
@@ -139,15 +143,16 @@ def fetch_answers(kahoot_id: str) -> dict:
 # ── Bot ───────────────────────────────────────────────────────────────────────
 class KahootBot:
     def __init__(self, name, token, session_id, pin,
-                 strategy="random", silent=False, stats=None, answer_map=None):
+                 strategy="random", silent=False, stats=None, answer_map=None, cookies=""):
         self.name       = name
         self.token      = token
         self.session_id = session_id
         self.pin        = pin
         self.strategy   = strategy
         self.silent     = silent
-        self.stats      = stats       # shared dict for live stats
-        self.answer_map = answer_map or {}  # {question_index: correct_choice}
+        self.stats      = stats
+        self.answer_map = answer_map or {}
+        self.cookies    = cookies
         self.ws         = None
         self.client_id  = None
         self.msg_id     = 0
@@ -286,9 +291,19 @@ class KahootBot:
 
     def run(self):
         self.running = True
+        headers = [
+            f"Origin: https://kahoot.it",
+            f"User-Agent: {UA}",
+            f"Referer: https://kahoot.it/",
+            f"Accept-Language: en-US,en;q=0.9",
+            f"Cache-Control: no-cache",
+            f"Pragma: no-cache",
+        ]
+        if self.cookies:
+            headers.append(f"Cookie: {self.cookies}")
         self.ws = websocket.WebSocketApp(
             WS_URL.format(self.session_id, self.token),
-            header={"Origin": "https://kahoot.it"},
+            header=headers,
             on_open=self.on_open, on_message=self.on_message,
             on_error=self.on_error, on_close=self.on_close)
         self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE,
@@ -320,7 +335,7 @@ def error(msg):   print(f"  {RD}✗ {msg}{R}"); sys.exit(1)
 def info(msg):    print(f"  {BL}→ {msg}{R}")
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
-def mode_auto(pin, token, session_id, answer_map=None):
+def mode_auto(pin, token, session_id, answer_map=None, cookies=""):
     answer_map = answer_map or {}
     divider("AUTO-ANSWER")
     name = prompt("Your player name:") or "KahootBot"
@@ -349,7 +364,7 @@ def mode_auto(pin, token, session_id, answer_map=None):
     label = f"{G}correct answers{R}" if strategy == "correct" else f"{Y}{strategy}{R}"
     info(f"Joining as {M}{B}{name}{R} — {label}")
     bot = KahootBot(name, token, session_id, pin,
-                    strategy=strategy, answer_map=answer_map)
+                    strategy=strategy, answer_map=answer_map, cookies=cookies)
     try:
         bot.run()
     except KeyboardInterrupt:
@@ -357,7 +372,7 @@ def mode_auto(pin, token, session_id, answer_map=None):
         print(f"\n  {Y}Stopped — answers: {bot.answers}  correct: {G}{bot.correct}{R}")
 
 
-def mode_flood(pin, token, session_id, answer_map=None):
+def mode_flood(pin, token, session_id, answer_map=None, cookies=""):
     answer_map = answer_map or {}
     divider("FLOOD MODE")
     prefix = prompt("Name prefix (empty = random funny names):")
@@ -381,7 +396,7 @@ def mode_flood(pin, token, session_id, answer_map=None):
             name = rname(prefix)
             bot  = KahootBot(name, token, session_id, pin,
                              strategy=strategy, silent=(count > 8),
-                             stats=stats, answer_map=answer_map)
+                             stats=stats, answer_map=answer_map, cookies=cookies)
             bots.append(bot)
             t = threading.Thread(target=bot.run, daemon=True)
             threads.append(t)
@@ -411,7 +426,7 @@ def mode_flood(pin, token, session_id, answer_map=None):
     print(f"  {G}Done — {stats['joined']} joined, {stats['answers']} answers given{R}")
 
 
-def mode_spam(pin, token, session_id):
+def mode_spam(pin, token, session_id, cookies=""):
     divider("NAME SPAM")
     prefix = prompt("Name prefix [default 'SPAM']:") or "SPAM"
     try:    count = int(prompt("How many [default 50]:") or "50")
@@ -424,7 +439,7 @@ def mode_spam(pin, token, session_id):
 
     def spam_one():
         name = prefix + str(random.randint(1000, 9999))
-        bot  = KahootBot(name, token, session_id, pin, silent=True)
+        bot  = KahootBot(name, token, session_id, pin, silent=True, cookies=cookies)
         t = threading.Thread(target=bot.run, daemon=True)
         t.start()
         time.sleep(1.8)
@@ -458,7 +473,7 @@ def main():
 
     print()
     info("Checking game...")
-    token, session_id, kahoot_id, err = get_session(pin)
+    token, session_id, kahoot_id, cookies, err = get_session(pin)
     if err:
         error(err)
 
@@ -484,11 +499,11 @@ def main():
     choice = prompt("Mode [1/2/3]:")
 
     if choice == "1":
-        mode_auto(pin, token, session_id, answer_map)
+        mode_auto(pin, token, session_id, answer_map, cookies)
     elif choice == "2":
-        mode_flood(pin, token, session_id, answer_map)
+        mode_flood(pin, token, session_id, answer_map, cookies)
     elif choice == "3":
-        mode_spam(pin, token, session_id)
+        mode_spam(pin, token, session_id, cookies)
     else:
         error("Invalid choice")
 
