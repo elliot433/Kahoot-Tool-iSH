@@ -192,8 +192,10 @@ def get_session(pin: str):
         # Kahoot routes to a specific game server — grab from response headers
         gameserver    = r.headers.get("x-kahoot-gameserver", "")
         session_token = r.headers.get("x-kahoot-session-token", "")
-        live_game_id  = (r.headers.get("x-kahoot-live-game-id") or
-                         str(data.get("liveGameId") or pin))
+
+        # WebSocket path uses the PIN, not liveGameId
+        # liveGameId is internal routing; PIN is the game identifier in the path
+        live_game_id = pin
 
         # Prefer the explicit session token if Kahoot provides one
         if session_token:
