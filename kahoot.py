@@ -176,15 +176,22 @@ def fetch_answers(kahoot_id: str) -> dict:
         return {}
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
+TIMING_RANGES = {
+    "fast":   (0.3,  1.5),
+    "medium": (3.0,  7.0),
+    "slow":   (9.0, 16.0),
+}
+
 class KahootBot:
     def __init__(self, name, token, session_id, pin,
-                 strategy="random", silent=False, stats=None, answer_map=None, cookies="", ws_base="wss://kahoot.it"):
+                 strategy="random", timing="fast", silent=False, stats=None, answer_map=None, cookies="", ws_base="wss://kahoot.it"):
         self.name       = name
         self.token      = token
         self.session_id = session_id
         self.pin        = pin
         self.ws_base    = ws_base
         self.strategy   = strategy
+        self.timing     = timing
         self.silent     = silent
         self.stats      = stats
         self.answer_map = answer_map or {}
@@ -308,7 +315,8 @@ class KahootBot:
                         idx   = content.get("questionIndex", 0)
                         pick  = self._pick(n, idx)
                         known = idx in self.answer_map
-                        delay = random.uniform(0.3, 1.2) if known else random.uniform(0.5, 2.5)
+                        lo, hi = TIMING_RANGES.get(self.timing, (0.3, 1.5))
+                        delay  = random.uniform(lo, hi)
                         time.sleep(delay)
                         self._answer(pick, idx)
                         icon  = CHOICE_ICONS[pick % 4]
@@ -397,27 +405,38 @@ def mode_auto(pin, token, session_id, answer_map=None, cookies="", ws_base="wss:
     divider("AUTO-ANSWER")
     name = prompt("Your player name:") or "KahootBot"
 
-    print(f"\n  Strategy:")
+    # ── Strategy ──────────────────────────────────────────────────────────────
+    print(f"\n  {W}{B}Antwort-Strategie:{R}")
     if answer_map:
-        print(f"  {W}1{R} {G}{B}Always correct ✓{R}")
+        print(f"  {W}1{R}  {G}{B}Immer richtig ✓{R}  {DIM}(alle Fragen, UUID geladen){R}")
     else:
-        print(f"  {W}1{R} {DIM}Always correct (no quiz loaded){R}")
-    print(f"  {W}2{R} Random answer")
-    print(f"  {W}3{R} Always 🔴 first")
-    print(f"  {W}4{R} Always 🔵 second")
-    print(f"  {W}5{R} Always 🟡 third\n")
+        print(f"  {W}1{R}  {DIM}Immer richtig  🔒 UUID erforderlich{R}")
+    print(f"  {W}2{R}  {Y}Zufällig{R}  {DIM}· Q1 zufällig, ab Q2 automatisch richtig{R}\n")
 
-    raw = prompt("Choice [1-5]:")
-    if raw == "1" and answer_map:
+    raw_s = prompt("Strategie [1/2]:")
+    if raw_s == "1" and answer_map:
         strategy = "correct"
     else:
-        strategy = {"3":"first","4":"second","5":"third"}.get(raw, "random")
+        strategy = "random"
 
+    # ── Timing ────────────────────────────────────────────────────────────────
+    print(f"\n  {W}{B}Antwort-Timing:{R}  {DIM}(damit es nicht auffällt){R}")
+    print(f"  {W}1{R}  ⚡ Erster   {DIM}0–1.5 s{R}")
+    print(f"  {W}2{R}  🕐 Mittlerer {DIM}3–7 s{R}")
+    print(f"  {W}3{R}  🐢 Letzter   {DIM}9–16 s{R}\n")
+
+    raw_t = prompt("Timing [1/2/3]:")
+    timing = {"1": "fast", "2": "medium", "3": "slow"}.get(raw_t, "fast")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
     divider()
-    label = f"{Y}{strategy}{R}"
-    info(f"Joining as {M}{B}{name}{R} — {label}")
+    strat_label  = f"{G}immer richtig ✓{R}" if strategy == "correct" else f"{Y}zufällig → ab Q2 richtig{R}"
+    timing_label = {"fast": f"⚡ erster", "medium": "🕐 mittlerer", "slow": "🐢 letzter"}[timing]
+    info(f"Joining als {M}{B}{name}{R}  ·  {strat_label}  ·  {BL}{timing_label} Antworter{R}")
+
     bot = KahootBot(name, token, session_id, pin,
-                    strategy=strategy, answer_map=answer_map, cookies=cookies, ws_base=ws_base)
+                    strategy=strategy, timing=timing,
+                    answer_map=answer_map, cookies=cookies, ws_base=ws_base)
     try:
         bot.run()
     except KeyboardInterrupt:
