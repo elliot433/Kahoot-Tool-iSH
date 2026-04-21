@@ -1,163 +1,133 @@
 #!/usr/bin/env python3
-"""
-KahootKit - Auto-Answer, Flooder & Spammer for iSH
-"""
-
-import os
-import re
-import sys
-import json
-import time
-import random
-import string
-import threading
-import subprocess
-import requests
-import websocket
-
+import os, re, sys, json, time, random, threading, subprocess, requests, websocket
 requests.packages.urllib3.disable_warnings()
 
-KAHOOT_SESSION  = "https://kahoot.it/reserve/session/{}/?{}"
-KAHOOT_WS       = "wss://kahoot.it/cometd/{}/{}"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-    "Accept": "application/json",
-    "Origin": "https://kahoot.it",
-}
+# ── ANSI ─────────────────────────────────────────────────────────────────────
+R="\033[0m"; B="\033[1m"; DIM="\033[2m"
+G="\033[92m"; RD="\033[91m"; Y="\033[93m"
+BL="\033[94m"; M="\033[95m"; C="\033[96m"; W="\033[97m"
 
-COLORS = {
-    "g": "\033[92m", "r": "\033[91m", "y": "\033[93m",
-    "b": "\033[94m", "m": "\033[95m", "c": "\033[96m",
-    "w": "\033[97m", "dim": "\033[2m", "rst": "\033[0m",
-    "bold": "\033[1m",
-}
-
-def c(color, text):
-    return COLORS.get(color, "") + str(text) + COLORS["rst"]
+def clr(): os.system("clear")
 
 BANNER = f"""
-{COLORS['g']}╔═══════════════════════════════╗
-║       K A H O O T K I T       ║
-║   Auto-Answer · Flood · Spam  ║
-╚═══════════════════════════════╝{COLORS['rst']}
+{M}{B}
+ ██╗  ██╗ █████╗ ██╗  ██╗ ██████╗  ██████╗ ████████╗
+ ██║ ██╔╝██╔══██╗██║  ██║██╔═══██╗██╔═══██╗╚══██╔══╝
+ █████╔╝ ███████║███████║██║   ██║██║   ██║   ██║
+ ██╔═██╗ ██╔══██║██╔══██║██║   ██║██║   ██║   ██║
+ ██║  ██╗██║  ██║██║  ██║╚██████╔╝╚██████╔╝   ██║
+ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝   ╚═╝   {R}
+{DIM}          Auto-Answer  ·  Flood  ·  Spam{R}
 """
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+SESSION_URL = "https://kahoot.it/reserve/session/{}/?{}"
+WS_URL      = "wss://kahoot.it/cometd/{}/{}"
+UA          = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15"
+HEADERS     = {"User-Agent": UA, "Accept": "application/json", "Origin": "https://kahoot.it"}
+CHOICE_ICONS = ["🔴", "🔵", "🟡", "🟢"]
+FUNNY_NAMES = [
+    "FBI_Van_#4","YourTeacher","TotallyHuman","NotABot_69","Area51Guard",
+    "IForgotMyName","WifiPassword","NPC_Player","undefined","NULL",
+    "GodMode","AnswerBot","1337H4x0r","PleaseIgnore","TheChosenOne",
+    "SlayQueen","IAmReal","BrainRot420","KahootKing","SchoolPC",
+    "AdminAdmin","DROP_TABLE","HelloWorld","JustViewing","MathIsEasy",
+]
 
-# ── Challenge Solver ─────────────────────────────────────────────────────────
-
+# ── Challenge Solver ──────────────────────────────────────────────────────────
 def solve_challenge(js: str) -> str:
-    # Try node.js first (most reliable)
+    # Primary: let Node.js run the actual JS
     try:
-        result = subprocess.run(
-            ["node", "-e", js + "\nconsole.log(typeof challenge === 'function' ? challenge() : '');"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        wrap = js + """
+var res = "";
+if (typeof challenge === "function") { res = challenge(); }
+else if (typeof challenge === "string") { res = challenge; }
+process.stdout.write(String(res));
+"""
+        out = subprocess.run(["node", "-e", wrap],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout:
+            return out.stdout
     except Exception:
         pass
 
-    # Fallback: Python regex parser for known Kahoot challenge patterns
+    # Fallback: Python regex solver for known Kahoot patterns
     try:
-        # Extract encoded key
         key_m = re.search(r'decode\.call\(this,\s*["\']([^"\']+)["\']', js)
         if not key_m:
-            key_m = re.search(r'"([A-Za-z0-9+/=]{20,})"', js)
+            key_m = re.search(r'["\']([A-Za-z0-9+/=]{20,})["\']', js)
         if not key_m:
             return ""
         key = key_m.group(1)
 
-        # Extract the transform expression (function body)
-        func_m = re.search(r'function\s*\(\s*\w\s*\)\s*\{[^}]*return\s+(.+?)[\s;]*\}', js)
+        func_m = re.search(r'function\s*\(\s*(\w)\s*\)\s*\{[^}]*return\s+(.+?)[\s;]*\}', js)
         if not func_m:
             return ""
-        expr_template = func_m.group(1).strip()
+        param, expr_tpl = func_m.group(1), func_m.group(2).strip()
 
-        # Find any variable defined before (like offset = 70)
-        var_vals = {}
-        for vm in re.finditer(r'var\s+(\w+)\s*=\s*(\d+)', js):
-            var_vals[vm.group(1)] = int(vm.group(2))
+        var_vals = {m.group(1): int(m.group(2))
+                    for m in re.finditer(r'var\s+(\w+)\s*=\s*(\d+)', js)}
 
         result = ""
         for ch in key:
-            x = ord(ch)
-            expr = expr_template
-            # Replace var names with their values
+            expr = expr_tpl
             for var, val in var_vals.items():
                 expr = re.sub(r'\b' + var + r'\b', str(val), expr)
-            # Replace the parameter (x, y, or whatever)
-            param_m = re.search(r'function\s*\((\w+)\)', js)
-            param = param_m.group(1) if param_m else "x"
-            expr = re.sub(r'\b' + param + r'\b', str(x), expr)
+            expr = re.sub(r'\b' + param + r'\b', str(ord(ch)), expr)
             try:
-                val = eval(expr)
-                result += chr(int(val) % 256)
+                result += chr(int(eval(expr)) % 256)
             except Exception:
                 result += ch
         return result
     except Exception:
         return ""
 
-
 def xor_decode(token: str, key: str) -> str:
     if not key:
         return token
-    result = ""
-    for i, ch in enumerate(token):
-        result += chr(ord(ch) ^ ord(key[i % len(key)]))
-    return result
-
+    return "".join(chr(ord(a) ^ ord(key[i % len(key)])) for i, a in enumerate(token))
 
 # ── Session ───────────────────────────────────────────────────────────────────
-
 def get_session(pin: str):
     ts = int(time.time() * 1000)
     try:
-        r = requests.get(KAHOOT_SESSION.format(pin, ts), headers=HEADERS, timeout=10)
+        r = requests.get(SESSION_URL.format(pin, ts), headers=HEADERS, timeout=10)
         if r.status_code == 404:
-            return None, None, "Game not found or not started yet"
+            return None, None, "Game not found or not started"
         if r.status_code != 200:
             return None, None, f"HTTP {r.status_code}"
-
         raw_token = r.headers.get("x-authtoken", "")
         data = r.json()
         challenge_js = data.get("challenge", "")
-
-        if challenge_js:
-            key = solve_challenge(challenge_js)
-            token = xor_decode(raw_token, key)
-        else:
-            token = raw_token
-
-        session_id = data.get("sessionId", pin)
-        return token, session_id, None
+        token = xor_decode(raw_token, solve_challenge(challenge_js)) if challenge_js else raw_token
+        return token, str(data.get("sessionId", pin)), None
     except Exception as e:
         return None, None, str(e)
 
-
 # ── Bot ───────────────────────────────────────────────────────────────────────
-
 class KahootBot:
-    def __init__(self, name: str, token: str, session_id: str, pin: str,
-                 strategy: str = "random", silent: bool = False):
-        self.name = name
-        self.token = token
-        self.session_id = str(session_id)
-        self.pin = str(pin)
-        self.strategy = strategy
-        self.silent = silent
-        self.ws = None
+    def __init__(self, name, token, session_id, pin,
+                 strategy="random", silent=False, stats=None):
+        self.name      = name
+        self.token     = token
+        self.session_id= session_id
+        self.pin       = pin
+        self.strategy  = strategy
+        self.silent    = silent
+        self.stats     = stats      # shared dict for live stats
+        self.ws        = None
         self.client_id = None
-        self.msg_id = 0
-        self.joined = False
-        self.score = 0
-        self.running = False
+        self.msg_id    = 0
+        self.joined    = False
+        self.running   = False
+        self.answers   = 0
 
     def _log(self, msg):
         if not self.silent:
-            print(f"  {c('dim', self.name[:12].ljust(12))} {msg}")
+            name_col = f"{M}{B}{self.name[:14].ljust(14)}{R}"
+            print(f"  {name_col} {msg}")
 
-    def _next_id(self):
+    def _id(self):
         self.msg_id += 1
         return str(self.msg_id)
 
@@ -168,327 +138,286 @@ class KahootBot:
             pass
 
     def _handshake(self):
-        self._send([{
-            "channel": "/meta/handshake",
-            "version": "1.0",
-            "minimumVersion": "1.0",
-            "supportedConnectionTypes": ["websocket"],
-            "id": self._next_id(),
-            "ext": {"ack": True, "timesync": {"tc": int(time.time() * 1000), "l": 0, "o": 0}},
-        }])
+        self._send([{"channel": "/meta/handshake", "version": "1.0",
+                     "minimumVersion": "1.0",
+                     "supportedConnectionTypes": ["websocket"],
+                     "id": self._id(),
+                     "ext": {"ack": True, "timesync": {
+                         "tc": int(time.time()*1000), "l": 0, "o": 0}}}])
 
-    def _connect(self):
-        self._send([{
-            "channel": "/meta/connect",
-            "clientId": self.client_id,
-            "connectionType": "websocket",
-            "id": self._next_id(),
-            "ext": {"ack": 0, "timesync": {"tc": int(time.time() * 1000), "l": 0, "o": 0}},
-        }])
+    def _meta_connect(self):
+        self._send([{"channel": "/meta/connect",
+                     "clientId": self.client_id,
+                     "connectionType": "websocket",
+                     "id": self._id(),
+                     "ext": {"ack": 0, "timesync": {
+                         "tc": int(time.time()*1000), "l": 0, "o": 0}}}])
 
     def _subscribe(self, channel):
-        self._send([{
-            "channel": "/meta/subscribe",
-            "clientId": self.client_id,
-            "subscription": channel,
-            "id": self._next_id(),
-        }])
+        self._send([{"channel": "/meta/subscribe",
+                     "clientId": self.client_id,
+                     "subscription": channel,
+                     "id": self._id()}])
 
     def _join(self):
-        self._send([{
-            "channel": "/service/controller",
-            "clientId": self.client_id,
-            "id": self._next_id(),
-            "data": {
-                "type": "login",
-                "gameid": self.session_id,
-                "host": "kahoot.it",
-                "name": self.name,
-                "content": json.dumps({"device": {"userAgent": HEADERS["User-Agent"], "screen": {"width": 390, "height": 844}}}),
-            },
-        }])
+        self._send([{"channel": "/service/controller",
+                     "clientId": self.client_id,
+                     "id": self._id(),
+                     "data": {
+                         "type": "login",
+                         "gameid": self.session_id,
+                         "host": "kahoot.it",
+                         "name": self.name,
+                         "content": json.dumps({"device": {
+                             "userAgent": UA,
+                             "screen": {"width": 390, "height": 844}}})}}])
 
-    def _answer(self, choice: int, question_idx: int):
-        self._send([{
-            "channel": "/service/controller",
-            "clientId": self.client_id,
-            "id": self._next_id(),
-            "data": {
-                "gameid": self.session_id,
-                "host": "kahoot.it",
-                "type": "message",
-                "id": 6,
-                "content": json.dumps({
-                    "choice": choice,
-                    "meta": {"lag": random.randint(20, 200), "device": {"userAgent": HEADERS["User-Agent"]}},
-                }),
-            },
-        }])
+    def _answer(self, choice: int, idx: int):
+        self._send([{"channel": "/service/controller",
+                     "clientId": self.client_id,
+                     "id": self._id(),
+                     "data": {
+                         "gameid": self.session_id,
+                         "host": "kahoot.it",
+                         "type": "message",
+                         "id": 6,
+                         "content": json.dumps({
+                             "choice": choice,
+                             "meta": {"lag": random.randint(20, 300),
+                                      "device": {"userAgent": UA}}})}}])
+        self.answers += 1
+        if self.stats:
+            self.stats["answers"] = self.stats.get("answers", 0) + 1
 
-    def _pick_answer(self, num_choices: int = 4) -> int:
-        if self.strategy == "first":
-            return 0
-        if self.strategy == "second":
-            return 1
-        if self.strategy == "third":
-            return 2
-        if self.strategy == "fourth":
-            return 3
-        return random.randint(0, num_choices - 1)
+    def _pick(self, n=4):
+        m = {"first":0,"second":1,"third":2,"fourth":3}
+        return m.get(self.strategy, random.randint(0, n-1))
 
     def on_message(self, ws, raw):
         try:
-            messages = json.loads(raw)
-            if not isinstance(messages, list):
-                messages = [messages]
-            for msg in messages:
+            for msg in (json.loads(raw) if isinstance(json.loads(raw), list) else [json.loads(raw)]):
                 ch = msg.get("channel", "")
 
-                if ch == "/meta/handshake":
-                    if msg.get("successful"):
-                        self.client_id = msg["clientId"]
-                        self._connect()
-                        self._subscribe("/service/player")
-                        self._subscribe("/service/controller")
-                        self._subscribe("/service/status")
-                        self._join()
+                if ch == "/meta/handshake" and msg.get("successful"):
+                    self.client_id = msg["clientId"]
+                    self._meta_connect()
+                    for sub in ["/service/player", "/service/controller", "/service/status"]:
+                        self._subscribe(sub)
+                    self._join()
 
                 elif ch == "/service/player":
-                    data = msg.get("data", {})
-                    content_raw = data.get("content", "{}")
-                    try:
-                        content = json.loads(content_raw) if isinstance(content_raw, str) else content_raw
-                    except Exception:
-                        content = {}
-                    typ = data.get("type", "")
-                    game_block = content.get("gameBlockIndex", None)
+                    data    = msg.get("data", {})
+                    raw_c   = data.get("content", "{}")
+                    content = json.loads(raw_c) if isinstance(raw_c, str) else raw_c
+                    ctype   = content.get("type", "")
 
-                    # Question start
-                    if typ == "message" and game_block is not None and not self.joined:
-                        self.joined = True
-                        self._log(c("g", "joined ✓"))
-
-                    if "numberOfChoices" in content or "questionIndex" in content:
-                        num_choices = content.get("numberOfChoices", 4)
-                        idx = content.get("questionIndex", game_block or 0)
-                        delay = random.uniform(0.3, 2.5)
-                        choice = self._pick_answer(num_choices)
+                    if ctype in ("gameBlockStart", "startQuestion"):
+                        if not self.joined:
+                            self.joined = True
+                            if self.stats:
+                                self.stats["joined"] = self.stats.get("joined", 0) + 1
+                            self._log(f"{G}joined ✓{R}")
+                        n    = content.get("numberOfChoices", 4)
+                        idx  = content.get("questionIndex", 0)
+                        pick = self._pick(n)
+                        delay = random.uniform(0.4, 3.0)
                         time.sleep(delay)
-                        self._answer(choice, idx)
-                        labels = ["🔴", "🔵", "🟡", "🟢"]
-                        self._log(f"Q{idx+1} → {labels[choice % 4]} ({delay:.1f}s)")
-
-                    # Score update
-                    if "totalScore" in content:
-                        self.score = content["totalScore"]
+                        self._answer(pick, idx)
+                        icon = CHOICE_ICONS[pick % 4]
+                        self._log(f"Q{idx+1} → {icon}  {DIM}({delay:.1f}s){R}")
 
                 elif ch == "/service/controller":
-                    data = msg.get("data", {})
-                    if data.get("type") == "loginResponse":
-                        ctype = data.get("content", "")
-                        if isinstance(ctype, str) and "duplicate" in ctype.lower():
-                            self._log(c("y", "duplicate name, reconnecting..."))
-                        elif not self.joined:
+                    data  = msg.get("data", {})
+                    ctype = data.get("type", "")
+                    if ctype == "loginResponse" and not self.joined:
+                        raw_c   = data.get("content", "{}")
+                        content = json.loads(raw_c) if isinstance(raw_c, str) else raw_c
+                        if not str(content).lower().count("duplicate"):
                             self.joined = True
-                            self._log(c("g", "joined ✓"))
-
+                            if self.stats:
+                                self.stats["joined"] = self.stats.get("joined", 0) + 1
+                            self._log(f"{G}joined ✓{R}")
         except Exception:
             pass
 
-    def on_error(self, ws, err):
-        self._log(c("r", f"error: {err}"))
-
-    def on_close(self, ws, *args):
-        self.running = False
-
-    def on_open(self, ws):
-        self._handshake()
+    def on_error(self, ws, err): self._log(f"{RD}✗ {err}{R}")
+    def on_close(self, ws, *a):  self.running = False
+    def on_open(self, ws):       self._handshake()
 
     def run(self):
-        url = KAHOOT_WS.format(self.session_id, self.token)
         self.running = True
         self.ws = websocket.WebSocketApp(
-            url,
+            WS_URL.format(self.session_id, self.token),
             header={"Origin": "https://kahoot.it"},
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close,
-        )
-        self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            on_open=self.on_open, on_message=self.on_message,
+            on_error=self.on_error, on_close=self.on_close)
+        self.ws.run_forever(ping_interval=25)
 
     def stop(self):
         self.running = False
-        if self.ws:
-            self.ws.close()
+        try: self.ws.close()
+        except Exception: pass
 
+# ── Helper ────────────────────────────────────────────────────────────────────
+def rname(prefix=""):
+    return (prefix + str(random.randint(100, 9999))) if prefix else \
+           (random.choice(FUNNY_NAMES) + str(random.randint(10, 99)))
 
-# ── Name Generators ───────────────────────────────────────────────────────────
+def divider(label=""):
+    line = "─" * 40
+    if label:
+        pad = (40 - len(label) - 2) // 2
+        print(f"\n  {DIM}{'─'*pad} {W}{B}{label}{R} {DIM}{'─'*pad}{R}")
+    else:
+        print(f"  {DIM}{line}{R}")
 
-FUNNY_NAMES = [
-    "YourMomBot", "WifiPassword", "FBI_Agent", "Area51Guard",
-    "IAmAHuman", "TotallyNotABot", "PleaseIgnore", "NotCheating",
-    "KahootKing", "AnswerBot9000", "1337Hax0r", "SchoolComputer",
-    "SlayQueen", "BrainRot420", "NPC_Player", "TheChosenOne",
-    "IForgotMyName", "HelloWorld", "NULL", "undefined",
-    "DROP_TABLE", "XSS_Alert", "AdminAdmin", "GodMode",
-]
+def prompt(msg):
+    return input(f"  {Y}▸ {W}{msg}{R} ").strip()
 
-def random_name(prefix: str = "") -> str:
-    if prefix:
-        return prefix + str(random.randint(100, 9999))
-    return random.choice(FUNNY_NAMES) + str(random.randint(10, 99))
-
+def success(msg): print(f"  {G}✓ {msg}{R}")
+def error(msg):   print(f"  {RD}✗ {msg}{R}"); sys.exit(1)
+def info(msg):    print(f"  {BL}→ {msg}{R}")
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
-
-def mode_single(pin: str):
-    print(c("b", "\n[Auto-Answer Mode]"))
-    name = input(c("y", "  Your name: ")).strip() or "KahootBot"
-    print("  Strategy:")
-    print("  1) Random answer")
-    print("  2) Always first (red)")
-    print("  3) Always second (blue)")
-    strat_map = {"1": "random", "2": "first", "3": "second"}
-    strat = strat_map.get(input(c("y", "  Choice [1/2/3]: ")).strip(), "random")
-
-    print(c("c", f"\n  Connecting to game {pin}..."))
-    token, session_id, err = get_session(pin)
-    if err:
-        print(c("r", f"  Error: {err}"))
-        return
-
-    print(c("g", f"  Session OK — joining as '{name}'"))
-    bot = KahootBot(name, token, session_id, pin, strategy=strat, silent=False)
+def mode_auto(pin, token, session_id):
+    divider("AUTO-ANSWER")
+    name = prompt("Your player name:") or "KahootBot"
+    print(f"\n  Strategy:\n"
+          f"  {W}1{R} Random answer\n"
+          f"  {W}2{R} Always 🔴 first\n"
+          f"  {W}3{R} Always 🔵 second\n"
+          f"  {W}4{R} Always 🟡 third\n"
+          f"  {W}5{R} Always 🟢 fourth\n")
+    s = {"1":"random","2":"first","3":"second","4":"third","5":"fourth"}
+    strategy = s.get(prompt("Choice [1-5]:"), "random")
+    divider()
+    info(f"Joining as {M}{B}{name}{R} — strategy: {Y}{strategy}{R}")
+    bot = KahootBot(name, token, session_id, pin, strategy=strategy)
     try:
         bot.run()
     except KeyboardInterrupt:
         bot.stop()
-        print(c("y", "\n  Stopped."))
+        print(f"\n  {Y}Stopped. Answers given: {bot.answers}{R}")
 
 
-def mode_flood(pin: str):
-    print(c("b", "\n[Flood Mode]"))
-    prefix = input(c("y", "  Name prefix (empty = funny names): ")).strip()
-    try:
-        count = int(input(c("y", "  Bot count [default 20]: ")).strip() or "20")
-    except ValueError:
-        count = 20
-    count = min(count, 200)
+def mode_flood(pin, token, session_id):
+    divider("FLOOD MODE")
+    prefix = prompt("Name prefix (empty = random funny names):")
+    try:    count = int(prompt("Bot count [default 30]:") or "30")
+    except: count = 30
+    count = min(max(count, 1), 200)
+    divider()
+    info(f"Launching {Y}{count}{R} bots...")
 
-    print(c("c", f"\n  Getting session for game {pin}..."))
-    token, session_id, err = get_session(pin)
-    if err:
-        print(c("r", f"  Error: {err}"))
-        return
-
-    print(c("g", f"  Session OK — launching {count} bots...\n"))
-    bots = []
+    stats   = {"joined": 0, "answers": 0}
+    bots    = []
     threads = []
+    stop_ev = threading.Event()
 
-    for i in range(count):
-        name = random_name(prefix)
-        bot = KahootBot(name, token, session_id, pin, strategy="random", silent=(count > 10))
-        bots.append(bot)
-        t = threading.Thread(target=bot.run, daemon=True)
-        threads.append(t)
-        t.start()
-        time.sleep(0.15)
-        if not bot.silent:
-            print(f"  {c('g', '▶')} {name}")
+    def launch():
+        for i in range(count):
+            if stop_ev.is_set():
+                break
+            name = rname(prefix)
+            bot  = KahootBot(name, token, session_id, pin,
+                             strategy="random", silent=(count > 8), stats=stats)
+            bots.append(bot)
+            t = threading.Thread(target=bot.run, daemon=True)
+            threads.append(t)
+            t.start()
+            if count <= 8:
+                info(f"Launched {M}{name}{R}")
+            else:
+                print(f"  {G}▶{R} {DIM}{name.ljust(20)}{R} "
+                      f"joined: {G}{stats['joined']}{R}   "
+                      f"answers: {Y}{stats['answers']}{R}",
+                      end="\r", flush=True)
+            time.sleep(0.2)
 
-    if count > 10:
-        print(c("g", f"  {count} bots launched silently"))
+    lt = threading.Thread(target=launch, daemon=True)
+    lt.start()
 
-    print(c("y", "\n  Press ENTER to stop all bots..."))
+    print(f"\n  {DIM}Press ENTER to stop...{R}")
     try:
         input()
     except KeyboardInterrupt:
         pass
 
-    print(c("r", "  Stopping all bots..."))
-    for bot in bots:
+    stop_ev.set()
+    print(f"\n  {RD}Stopping {len(bots)} bots...{R}")
+    for b in bots:
+        b.stop()
+    print(f"  {G}Done — {stats['joined']} joined, {stats['answers']} answers given{R}")
+
+
+def mode_spam(pin, token, session_id):
+    divider("NAME SPAM")
+    prefix = prompt("Name prefix [default 'SPAM']:") or "SPAM"
+    try:    count = int(prompt("How many [default 50]:") or "50")
+    except: count = 50
+    divider()
+    info(f"Spamming {Y}{count}{R} names into lobby...\n")
+
+    done = [0]
+    lock = threading.Lock()
+
+    def spam_one():
+        name = prefix + str(random.randint(1000, 9999))
+        bot  = KahootBot(name, token, session_id, pin, silent=True)
+        t = threading.Thread(target=bot.run, daemon=True)
+        t.start()
+        time.sleep(1.8)
         bot.stop()
-    print(c("g", "  Done."))
-
-
-def mode_spam(pin: str):
-    print(c("b", "\n[Name Spam Mode]"))
-    print("  Spam-joins and immediately leaves to fill the lobby.\n")
-    prefix = input(c("y", "  Name prefix [default 'SPAM']: ")).strip() or "SPAM"
-    try:
-        count = int(input(c("y", "  How many joins [default 50]: ")).strip() or "50")
-    except ValueError:
-        count = 50
-
-    print(c("c", f"\n  Getting session..."))
-    token, session_id, err = get_session(pin)
-    if err:
-        print(c("r", f"  Error: {err}"))
-        return
-
-    print(c("g", f"  Spamming {count} names into lobby...\n"))
-    joined = 0
-
-    def spam_one(name):
-        nonlocal joined
-        try:
-            bot = KahootBot(name, token, session_id, pin, silent=True)
-            t = threading.Thread(target=bot.run, daemon=True)
-            t.start()
-            time.sleep(1.5)
-            bot.stop()
-            joined += 1
-        except Exception:
-            pass
+        with lock:
+            done[0] += 1
+        pct = int(done[0] / count * 20)
+        bar = G + "█" * pct + DIM + "░" * (20 - pct) + R
+        print(f"  [{bar}] {done[0]}/{count}  {DIM}{name}{R}",
+              end="\r", flush=True)
 
     threads = []
-    for i in range(count):
-        name = prefix + str(random.randint(1000, 9999))
-        t = threading.Thread(target=spam_one, args=(name,), daemon=True)
+    for _ in range(count):
+        t = threading.Thread(target=spam_one, daemon=True)
         threads.append(t)
         t.start()
-        time.sleep(0.2)
-        print(f"  {c('y', '→')} {name}  ({joined} joined)", end="\r")
+        time.sleep(0.25)
 
     for t in threads:
-        t.join(timeout=5)
-
-    print(c("g", f"\n  Done — {joined}/{count} joins completed."))
-
+        t.join(timeout=8)
+    print(f"\n  {G}Done — {done[0]}/{count} names sent{R}")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
+    clr()
     print(BANNER)
 
-    pin = input(c("g", "  Enter Kahoot PIN: ")).strip()
+    pin = prompt("Enter Kahoot PIN:")
     if not pin.isdigit():
-        print(c("r", "  Invalid PIN."))
-        sys.exit(1)
+        error("PIN must be numbers only")
 
-    print(c("c", f"\n  Checking game {pin}..."))
+    print()
+    info("Checking game...")
     token, session_id, err = get_session(pin)
     if err:
-        print(c("r", f"  Game not found: {err}"))
-        sys.exit(1)
-    print(c("g", f"  Game found! Session: {session_id}\n"))
+        error(err)
 
-    print(f"  {c('w', '1)')} Auto-Answer  {c('dim', '— join and answer questions automatically')}")
-    print(f"  {c('w', '2)')} Flood        {c('dim', '— fill lobby with bots')}")
-    print(f"  {c('w', '3)')} Name Spam    {c('dim', '— spam lobby with names')}")
+    success(f"Game found!  Session: {DIM}{session_id}{R}")
 
-    choice = input(c("y", "\n  Mode [1/2/3]: ")).strip()
+    divider("SELECT MODE")
+    print(f"\n  {W}{B}1{R}  ⚡ Auto-Answer  {DIM}join & answer every question{R}")
+    print(f"  {W}{B}2{R}  👥 Flood        {DIM}fill lobby with bots (max 200){R}")
+    print(f"  {W}{B}3{R}  💣 Name Spam    {DIM}overflow lobby with random names{R}\n")
+
+    choice = prompt("Mode [1/2/3]:")
 
     if choice == "1":
-        mode_single(pin)
+        mode_auto(pin, token, session_id)
     elif choice == "2":
-        mode_flood(pin)
+        mode_flood(pin, token, session_id)
     elif choice == "3":
-        mode_spam(pin)
+        mode_spam(pin, token, session_id)
     else:
-        print(c("r", "  Invalid choice."))
-
+        error("Invalid choice")
 
 if __name__ == "__main__":
     main()
