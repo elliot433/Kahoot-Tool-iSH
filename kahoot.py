@@ -272,7 +272,7 @@ def get_session(pin: str):
 
         cookies = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
 
-        src = "challenge" if (challenge_js and token) else ("session_token" if session_token else "none")
+        src = "challenge" if (challenge_js and token) else ("session_token" if session_token_b64 else "none")
         print(f"  {DIM}token source: {src}  →  {token[:16]}…  WS: {ws_base}/cometd/{live_game_id}/{token[:8]}…{R}")
 
         return token, live_game_id, ws_base, cookies, None
