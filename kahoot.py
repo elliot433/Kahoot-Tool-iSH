@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, sys, json, time, random, threading, subprocess, ssl, socket, base64, requests, websocket
+import os, re, sys, json, time, random, threading, subprocess, ssl, socket, base64, tempfile, requests, websocket
 requests.packages.urllib3.disable_warnings()
 websocket.enableTrace(False)
 
@@ -61,7 +61,7 @@ def _py_solve(js: str) -> str:
             return key
 
     # Pattern B: decode.call(this, 'token', function(x) { ... return expr; })
-    tm = re.search(r'decode\.call\(this,\s*["\']([^"\']+)["\']', js)
+    tm = re.search(r"decode\.call\(this,\s*['\"](.+?)['\"](?=\s*,)", js, re.DOTALL)
     fm = re.search(r'function\s*\(\s*(\w+)\s*\)\s*\{(.+?)\}', js, re.DOTALL)
     if tm and fm:
         token_str = tm.group(1)
@@ -114,24 +114,34 @@ var _ = {
     isNaN: isNaN
 };
 """
-        wrap = helpers + """
+        script = helpers + """
 var res = "";
-// Try A: challenge JS is a direct expression (decode.call returns the key)
-try { res = (function(){ return (""" + js.replace("\\", "\\\\") + """); })(); } catch(_a) {}
-// Try B: challenge JS defines a 'challenge' var or function
+try { res = (function(){ return (CHALLENGE_PLACEHOLDER); })(); } catch(_a) {}
 if (!res || typeof res !== "string") {
   try {
-    """ + js + """
+    CHALLENGE_PLACEHOLDER
     if (typeof challenge === "function") res = challenge();
     else if (typeof challenge !== "undefined") res = String(challenge);
   } catch(_b) {}
 }
 process.stdout.write(typeof res === "string" ? res : "");
-"""
-        out = subprocess.run(["node", "-e", wrap],
-                             capture_output=True, text=True, timeout=5)
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
+""".replace("CHALLENGE_PLACEHOLDER", js)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.js',
+                                            delete=False, encoding='utf-8') as f:
+                f.write(script)
+                tmp = f.name
+            out = subprocess.run(["node", tmp],
+                                 capture_output=True, text=True, timeout=5)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except Exception:
+            pass
+        finally:
+            if tmp:
+                try: os.unlink(tmp)
+                except Exception: pass
     except Exception:
         pass
 
@@ -236,7 +246,7 @@ def get_session(pin: str):
         # Debug block — always shown so we can diagnose 403
         print(f"  {DIM}[debug] challenge_js : {'yes ('+str(len(challenge_js))+' chars)' if challenge_js else 'NONE'}{R}")
         if challenge_js:
-            print(f"  {DIM}[debug] challenge txt: {challenge_js[:120].replace(chr(10),' ')}{R}")
+            print(f"  {DIM}[debug] challenge txt: {challenge_js.replace(chr(10),' ')}{R}")
         print(f"  {DIM}[debug] challenge key: {repr(key[:16]) if key else 'EMPTY'}{R}")
         print(f"  {DIM}[debug] raw_token     : {raw_token[:20]}…{R}")
         print(f"  {DIM}[debug] session_token : {session_token[:20] if session_token else 'NONE'}{R}")
