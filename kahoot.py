@@ -447,8 +447,10 @@ def mode_flood(pin, token, session_id, answer_map=None, cookies="", ws_base="wss
             if stop_ev.is_set():
                 break
             name = rname(prefix)
+            # first bot is visible so errors are shown
+            silent = (i > 0)
             bot  = KahootBot(name, token, session_id, pin,
-                             strategy=strategy, silent=True,
+                             strategy=strategy, silent=silent,
                              stats=stats, answer_map=answer_map, cookies=cookies, ws_base=ws_base)
             bots.append(bot)
             t = threading.Thread(target=bot.run, daemon=True)
@@ -459,7 +461,7 @@ def mode_flood(pin, token, session_id, answer_map=None, cookies="", ws_base="wss
                   f"joined: {G}{stats['joined']}{R}  "
                   f"answers: {BL}{stats['answers']}{R}",
                   end="\r", flush=True)
-            time.sleep(0.3)
+            time.sleep(0.35)
 
     lt = threading.Thread(target=launch, daemon=True)
     lt.start()
@@ -482,36 +484,34 @@ def mode_spam(pin, token, session_id, cookies="", ws_base="wss://kahoot.it"):
     prefix = prompt("Name prefix [default 'SPAM']:") or "SPAM"
     try:    count = int(prompt("How many [default 50]:") or "50")
     except: count = 50
+    count = min(max(count, 1), 200)
     divider()
-    info(f"Spamming {Y}{count}{R} names into lobby...\n")
+    info(f"Filling lobby with {Y}{count}{R} names — bots stay until you press ENTER\n")
 
-    done = [0]
-    lock = threading.Lock()
+    bots = []
 
-    def spam_one():
+    for i in range(count):
         name = prefix + str(random.randint(1000, 9999))
-        bot  = KahootBot(name, token, session_id, pin, silent=True, cookies=cookies, ws_base=ws_base)
+        bot  = KahootBot(name, token, session_id, pin,
+                         silent=True, cookies=cookies, ws_base=ws_base)
         t = threading.Thread(target=bot.run, daemon=True)
         t.start()
-        time.sleep(1.8)
-        bot.stop()
-        with lock:
-            done[0] += 1
-        pct = int(done[0] / count * 20)
+        bots.append(bot)
+        pct = int((i + 1) / count * 20)
         bar = G + "█" * pct + DIM + "░" * (20 - pct) + R
-        print(f"  [{bar}] {done[0]}/{count}  {DIM}{name}{R}",
+        print(f"  [{bar}] {i+1}/{count}  {DIM}{name}{R}",
               end="\r", flush=True)
+        time.sleep(0.35)
 
-    threads = []
-    for _ in range(count):
-        t = threading.Thread(target=spam_one, daemon=True)
-        threads.append(t)
-        t.start()
-        time.sleep(0.25)
+    print(f"\n\n  {G}✓ {count} bots in lobby — press ENTER to disconnect{R}")
+    try:
+        input()
+    except KeyboardInterrupt:
+        pass
 
-    for t in threads:
-        t.join(timeout=8)
-    print(f"\n  {G}Done — {done[0]}/{count} names sent{R}")
+    for b in bots:
+        b.stop()
+    print(f"  {RD}All bots disconnected{R}")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
