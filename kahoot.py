@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, sys, json, time, random, threading, subprocess, ssl, socket, requests, websocket
+import os, re, sys, json, time, random, threading, subprocess, ssl, socket, base64, requests, websocket
 requests.packages.urllib3.disable_warnings()
 websocket.enableTrace(False)
 
@@ -110,7 +110,14 @@ def get_session(pin: str):
         raw_token = r.headers.get("x-authtoken", "")
         data = r.json()
         challenge_js = data.get("challenge", "")
-        token = xor_decode(raw_token, solve_challenge(challenge_js)) if challenge_js else raw_token
+        # Kahoot encodes the token as base64 — decode it first
+        try:
+            decoded_token = base64.b64decode(raw_token).decode("utf-8")
+        except Exception:
+            decoded_token = raw_token
+        key = solve_challenge(challenge_js) if challenge_js else ""
+        token = xor_decode(decoded_token, key) if key else decoded_token
+        print(f"  {DIM}[dbg] token (first 12): '{token[:12]}...'{R}")
         # Try all known field names for quiz ID
         kahoot_id = (data.get("kahootId") or data.get("quizId") or
                      data.get("quiz", {}).get("uuid") or
@@ -402,20 +409,18 @@ def mode_flood(pin, token, session_id, answer_map=None, cookies=""):
                 break
             name = rname(prefix)
             bot  = KahootBot(name, token, session_id, pin,
-                             strategy=strategy, silent=(count > 8),
+                             strategy=strategy, silent=True,
                              stats=stats, answer_map=answer_map, cookies=cookies)
             bots.append(bot)
             t = threading.Thread(target=bot.run, daemon=True)
             threads.append(t)
             t.start()
-            if count <= 8:
-                info(f"Launched {M}{name}{R}")
-            else:
-                print(f"  {G}▶{R} {DIM}{name.ljust(20)}{R} "
-                      f"joined: {G}{stats['joined']}{R}   "
-                      f"answers: {Y}{stats['answers']}{R}",
-                      end="\r", flush=True)
-            time.sleep(0.2)
+            launched = i + 1
+            print(f"  {G}▶{R} launched {Y}{launched}/{count}{R}  "
+                  f"joined: {G}{stats['joined']}{R}  "
+                  f"answers: {BL}{stats['answers']}{R}",
+                  end="\r", flush=True)
+            time.sleep(0.3)
 
     lt = threading.Thread(target=launch, daemon=True)
     lt.start()
