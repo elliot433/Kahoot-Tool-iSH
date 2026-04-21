@@ -97,35 +97,38 @@ def xor_decode(token: str, key: str) -> str:
     return "".join(chr(ord(a) ^ ord(key[i % len(key)])) for i, a in enumerate(token))
 
 # ── Session ───────────────────────────────────────────────────────────────────
-_session = requests.Session()   # keeps cookies across requests
+_session = requests.Session()
 
 def get_session(pin: str):
     ts = int(time.time() * 1000)
     try:
+        # Get base cookies from Kahoot homepage first
+        _session.get("https://kahoot.it/", headers=HEADERS, timeout=8)
+    except Exception:
+        pass
+    try:
         r = _session.get(SESSION_URL.format(pin, ts), headers=HEADERS, timeout=10)
         if r.status_code == 404:
-            return None, None, None, None, "Game not found or not started"
+            return None, None, None, "Game not found or not started"
         if r.status_code != 200:
-            return None, None, None, None, f"HTTP {r.status_code}"
+            return None, None, None, f"HTTP {r.status_code}"
         raw_token = r.headers.get("x-authtoken", "")
-        data = r.json()
+        data      = r.json()
         challenge_js = data.get("challenge", "")
-        # Kahoot encodes the token as base64 — decode it first
+
+        # Decode token: base64 → XOR with solved challenge
         try:
-            decoded_token = base64.b64decode(raw_token).decode("utf-8")
+            decoded = base64.b64decode(raw_token).decode("utf-8")
         except Exception:
-            decoded_token = raw_token
-        key = solve_challenge(challenge_js) if challenge_js else ""
-        token = xor_decode(decoded_token, key) if key else decoded_token
-        print(f"  {DIM}[dbg] token (first 12): '{token[:12]}...'{R}")
-        # liveGameId is the real session ID for the WebSocket URL
+            decoded = raw_token
+        key   = solve_challenge(challenge_js) if challenge_js else ""
+        token = xor_decode(decoded, key) if key else decoded
+
         session_id = str(data.get("liveGameId") or data.get("sessionId") or pin)
-        kahoot_id = ""  # Kahoot no longer exposes quiz UUID in session
-        cookies = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
-        print(f"  {DIM}[dbg] liveGameId={session_id}  token={token[:10]}...{R}")
-        return token, session_id, kahoot_id, cookies, None
+        cookies    = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
+        return token, session_id, cookies, None
     except Exception as e:
-        return None, None, None, None, str(e)
+        return None, None, None, str(e)
 
 # ── Answer Fetcher ────────────────────────────────────────────────────────────
 def fetch_answers(kahoot_id: str) -> dict:
@@ -350,14 +353,20 @@ def mode_auto(pin, token, session_id, answer_map=None, cookies=""):
     name = prompt("Your player name:") or "KahootBot"
 
     print(f"\n  Strategy:")
-    print(f"  {W}1{R} Random answer")
-    print(f"  {W}2{R} Always 🔴 first")
-    print(f"  {W}3{R} Always 🔵 second")
-    print(f"  {W}4{R} Always 🟡 third")
-    print(f"  {W}5{R} Always 🟢 fourth\n")
+    if answer_map:
+        print(f"  {W}1{R} {G}{B}Always correct ✓{R}")
+    else:
+        print(f"  {W}1{R} {DIM}Always correct (no quiz loaded){R}")
+    print(f"  {W}2{R} Random answer")
+    print(f"  {W}3{R} Always 🔴 first")
+    print(f"  {W}4{R} Always 🔵 second")
+    print(f"  {W}5{R} Always 🟡 third\n")
 
     raw = prompt("Choice [1-5]:")
-    strategy = {"2":"first","3":"second","4":"third","5":"fourth"}.get(raw, "random")
+    if raw == "1" and answer_map:
+        strategy = "correct"
+    else:
+        strategy = {"3":"first","4":"second","5":"third"}.get(raw, "random")
 
     divider()
     label = f"{Y}{strategy}{R}"
@@ -470,13 +479,28 @@ def main():
 
     print()
     info("Checking game...")
-    token, session_id, kahoot_id, cookies, err = get_session(pin)
+    token, session_id, cookies, err = get_session(pin)
     if err:
         error(err)
 
     success(f"Game found!  Session: {DIM}{session_id}{R}")
 
+    # Optional: load correct answers via quiz UUID
     answer_map = {}
+    print(f"\n  {DIM}Kahoot quiz link or UUID for correct answers (enter to skip):{R}")
+    quiz_input = prompt("Quiz link/UUID:").strip()
+    if quiz_input:
+        # Extract UUID from link like kahoot.it/kahoot/play?quizId=UUID or raw UUID
+        uuid_m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", quiz_input, re.I)
+        if uuid_m:
+            info("Fetching answers...")
+            answer_map = fetch_answers(uuid_m.group(0))
+            if answer_map:
+                success(f"Loaded {G}{len(answer_map)}{R} correct answers!")
+            else:
+                print(f"  {Y}⚠ Quiz is private or not found{R}")
+        else:
+            print(f"  {Y}⚠ No UUID found in input{R}")
 
     divider("SELECT MODE")
     print(f"\n  {W}{B}1{R}  ⚡ Auto-Answer  {DIM}join & answer every question{R}")
