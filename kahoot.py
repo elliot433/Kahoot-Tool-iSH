@@ -44,6 +44,46 @@ FUNNY_NAMES = [
 ]
 
 # ── Challenge Solver ──────────────────────────────────────────────────────────
+def _py_solve(js: str) -> str:
+    """Pure-Python solver for known Kahoot challenge patterns (no Node needed)."""
+    # Pattern A: var offset = "..."; challenge built via XOR loop
+    m = re.search(r'var\s+offset\s*=\s*["\']([^"\']+)["\']', js)
+    if m:
+        offset = m.group(1)
+        p = q = 0
+        result = []
+        for i, c in enumerate(offset):
+            p = (p + q) % 256
+            q = (ord(c) + i + q) % 256
+            result.append(chr(ord(c) ^ p))
+        key = "".join(result)
+        if key:
+            return key
+
+    # Pattern B: decode.call(this, 'token', function(x) { return expr; })
+    tm = re.search(r'decode\.call\(this,\s*["\']([^"\']+)["\']', js)
+    fm = re.search(r'function\s*\(\s*(\w+)\s*\)\s*\{(.+?)\}', js, re.DOTALL)
+    if tm and fm:
+        token_str = tm.group(1)
+        param     = fm.group(1)
+        body      = fm.group(2)
+        var_vals  = {v.group(1): int(v.group(2))
+                     for v in re.finditer(r'var\s+(\w+)\s*=\s*(\d+)', body)}
+        ret_m     = re.search(r'return\s+(.+?);', body)
+        if ret_m:
+            expr_tpl = ret_m.group(1).strip()
+            result = ""
+            for c in token_str:
+                expr = expr_tpl
+                for var, val in var_vals.items():
+                    expr = re.sub(r'\b' + var + r'\b', str(val), expr)
+                expr = re.sub(r'\b' + param + r'\b', str(ord(c)), expr)
+                try:    result += chr(int(eval(expr)) % 256)
+                except: result += c
+            if result:
+                return result
+    return ""
+
 def solve_challenge(js: str) -> str:
     # Primary: Node.js with Kahoot helper stubs injected
     try:
@@ -80,7 +120,12 @@ process.stdout.write(String(res));
     except Exception:
         pass
 
-    # Fallback: Python regex solver for known Kahoot patterns
+    # Fallback A: pure Python pattern solver (works without Node.js)
+    py = _py_solve(js)
+    if py:
+        return py
+
+    # Fallback B: generic Python regex solver
     try:
         key_m = re.search(r'decode\.call\(this,\s*["\']([^"\']+)["\']', js)
         if not key_m:
@@ -172,6 +217,8 @@ def get_session(pin: str):
 
         # Debug block — always shown so we can diagnose 403
         print(f"  {DIM}[debug] challenge_js : {'yes ('+str(len(challenge_js))+' chars)' if challenge_js else 'NONE'}{R}")
+        if challenge_js:
+            print(f"  {DIM}[debug] challenge txt: {challenge_js[:120].replace(chr(10),' ')}{R}")
         print(f"  {DIM}[debug] challenge key: {repr(key[:16]) if key else 'EMPTY'}{R}")
         print(f"  {DIM}[debug] raw_token     : {raw_token[:20]}…{R}")
         print(f"  {DIM}[debug] session_token : {session_token[:20] if session_token else 'NONE'}{R}")
