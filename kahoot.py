@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-import os, re, sys, json, time, random, threading, subprocess, ssl, socket, base64, tempfile, requests, websocket
+import os, re, sys, json, time, random, threading, subprocess, ssl, socket, base64, tempfile
+from urllib.parse import quote
+import requests, websocket
 requests.packages.urllib3.disable_warnings()
 websocket.enableTrace(False)
 
@@ -74,8 +76,10 @@ def _py_solve(js: str) -> str:
         token_str  = token_m.group(1)
         offset_raw = offset_m.group(1).strip()
         try:
-            # Evaluate pure arithmetic — replace any identifier with 0 first
-            safe = re.sub(r'[A-Za-z_]\w*', '0', offset_raw)
+            # Strip all Unicode whitespace/control chars, keep only ASCII
+            clean = "".join(c if ord(c) < 128 else " " for c in offset_raw)
+            # Replace any identifier with 0 (pure arithmetic only)
+            safe = re.sub(r'[A-Za-z_]\w*', '0', clean)
             offset_val = int(eval(safe))
         except Exception:
             offset_val = None
@@ -227,25 +231,28 @@ def get_session(pin: str):
             return None, None, None, None, "Game not found or not started"
         if r.status_code != 200:
             return None, None, None, None, f"HTTP {r.status_code}"
-        data         = r.json()
-        challenge_js = data.get("challenge", "")
-        gameserver    = r.headers.get("x-kahoot-gameserver", "")
-        session_token = r.headers.get("x-kahoot-session-token", "")
+        data              = r.json()
+        challenge_js      = data.get("challenge", "")
+        gameserver        = r.headers.get("x-kahoot-gameserver", "")
+        session_token_b64 = r.headers.get("x-kahoot-session-token", "")
 
-        # Current Kahoot protocol: challenge result IS the WebSocket token directly.
-        # x-authtoken is no longer returned by the API.
-        token = solve_challenge(challenge_js) if challenge_js else ""
+        # Kahoot protocol (2024+):
+        #   challenge_result = decode(token_str) → used as XOR key
+        #   WebSocket token  = XOR(base64decode(x-kahoot-session-token), challenge_result)
+        challenge_result = solve_challenge(challenge_js) if challenge_js else ""
+        token = ""
+        if challenge_result and session_token_b64:
+            try:
+                st_bytes = base64.b64decode(session_token_b64 + "==")
+                token = "".join(
+                    chr(b ^ ord(challenge_result[i % len(challenge_result)]))
+                    for i, b in enumerate(st_bytes))
+            except Exception:
+                pass
 
-        # Fallback 1: session_token header (when challenge solving fails)
+        # Fallback: use session_token directly if XOR failed
         if not token:
-            token = session_token
-
-        # Fallback 2: legacy x-authtoken XOR (old API, kept for safety)
-        if not token:
-            raw_token = r.headers.get("x-authtoken", "")
-            try:    decoded = base64.b64decode(raw_token).decode("utf-8")
-            except: decoded = raw_token
-            token = decoded
+            token = session_token_b64
 
         live_game_id = pin
 
@@ -485,8 +492,10 @@ class KahootBot:
         ]
         if self.cookies:
             headers.append(f"Cookie: {self.cookies}")
+        safe_chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
+        tok_encoded = quote(self.token, safe=safe_chars)
         self.ws = websocket.WebSocketApp(
-            f"{self.ws_base}/cometd/{self.session_id}/{self.token}",
+            f"{self.ws_base}/cometd/{self.session_id}/{tok_encoded}",
             header=headers,
             on_open=self.on_open, on_message=self.on_message,
             on_error=self.on_error, on_close=self.on_close)

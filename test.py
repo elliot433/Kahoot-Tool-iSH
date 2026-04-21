@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Quick connection test — run: python3 test.py <PIN>"""
 import sys, time, json, base64, ssl, socket, threading, requests, websocket
+from urllib.parse import quote
 requests.packages.urllib3.disable_warnings()
 websocket.enableTrace(False)
 
@@ -11,7 +12,7 @@ def _safe(self, *a, **kw):
     except OSError: pass
 socket.socket.setsockopt = _safe
 
-from kahoot import get_session, solve_challenge, xor_decode
+from kahoot import get_session
 
 PIN = sys.argv[1] if len(sys.argv) > 1 else input("PIN: ").strip()
 
@@ -24,7 +25,8 @@ print(f"    token   : {token[:20]}...")
 print(f"    session : {session_id}")
 print(f"    ws_base : {ws_base}")
 
-WS_URL = f"{ws_base}/cometd/{session_id}/{token}"
+safe_chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
+WS_URL = f"{ws_base}/cometd/{session_id}/{quote(token, safe=safe_chars)}"
 print(f"\n[2] Testing WebSocket: {WS_URL[:60]}...")
 
 result = {"connected": False, "handshake": False, "joined": False, "error": None}
