@@ -109,9 +109,9 @@ def get_session(pin: str):
     try:
         r = _session.get(SESSION_URL.format(pin, ts), headers=HEADERS, timeout=10)
         if r.status_code == 404:
-            return None, None, None, "Game not found or not started"
+            return None, None, None, None, "Game not found or not started"
         if r.status_code != 200:
-            return None, None, None, f"HTTP {r.status_code}"
+            return None, None, None, None, f"HTTP {r.status_code}"
         raw_token    = r.headers.get("x-authtoken", "")
         data         = r.json()
         challenge_js = data.get("challenge", "")
@@ -137,10 +137,14 @@ def get_session(pin: str):
         # Build WebSocket base URL from gameserver header
         if gameserver:
             gs = gameserver.strip().rstrip("/")
-            if not gs.startswith("ws"):
-                ws_base = "wss://" + gs.lstrip("https://").lstrip("http://")
+            if gs.startswith("https://"):
+                gs = gs[len("https://"):]
+            elif gs.startswith("http://"):
+                gs = gs[len("http://"):]
+            if gs.startswith("wss://") or gs.startswith("ws://"):
+                ws_base = gs
             else:
-                ws_base = gs.replace("https://", "wss://").replace("http://", "ws://")
+                ws_base = "wss://" + gs
         else:
             ws_base = "wss://kahoot.it"
 
@@ -261,14 +265,24 @@ class KahootBot:
             self.stats["answers"] = self.stats.get("answers", 0) + 1
 
     def _pick(self, n=4, idx=0):
-        if self.strategy == "correct" and idx in self.answer_map:
+        # answer_map is filled live from result messages — use it if available
+        if idx in self.answer_map:
             return self.answer_map[idx]
         m = {"first":0,"second":1,"third":2,"fourth":3}
         return m.get(self.strategy, random.randint(0, n-1))
 
+    def _parse(self, raw_c):
+        try:
+            return json.loads(raw_c) if isinstance(raw_c, str) else raw_c
+        except Exception:
+            return {}
+
     def on_message(self, ws, raw):
         try:
-            for msg in (json.loads(raw) if isinstance(json.loads(raw), list) else [json.loads(raw)]):
+            msgs = json.loads(raw)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            for msg in msgs:
                 ch = msg.get("channel", "")
 
                 if ch == "/meta/handshake" and msg.get("successful"):
@@ -280,10 +294,10 @@ class KahootBot:
 
                 elif ch == "/service/player":
                     data    = msg.get("data", {})
-                    raw_c   = data.get("content", "{}")
-                    content = json.loads(raw_c) if isinstance(raw_c, str) else raw_c
+                    content = self._parse(data.get("content", "{}"))
                     ctype   = content.get("type", "")
 
+                    # Question starts → answer it
                     if ctype in ("gameBlockStart", "startQuestion"):
                         if not self.joined:
                             self.joined = True
@@ -293,23 +307,34 @@ class KahootBot:
                         n     = content.get("numberOfChoices", 4)
                         idx   = content.get("questionIndex", 0)
                         pick  = self._pick(n, idx)
-                        is_correct = idx in self.answer_map and self.answer_map[idx] == pick
-                        if is_correct:
-                            self.correct += 1
-                        delay = random.uniform(0.4, 2.5)
+                        known = idx in self.answer_map
+                        delay = random.uniform(0.3, 1.2) if known else random.uniform(0.5, 2.5)
                         time.sleep(delay)
                         self._answer(pick, idx)
                         icon  = CHOICE_ICONS[pick % 4]
-                        check = f"{G}✓{R}" if is_correct else f"{DIM}?{R}"
-                        self._log(f"Q{idx+1} → {icon} {check}  {DIM}({delay:.1f}s){R}")
+                        tag   = f"{G}✓ correct{R}" if known else f"{Y}? random{R}"
+                        self._log(f"Q{idx+1} → {icon} {tag}  {DIM}({delay:.1f}s){R}")
+                        if known:
+                            self.correct += 1
+
+                    # Results arrive → capture correct answer for NEXT time
+                    elif ctype in ("revealAnswer", "questionEnd", "gameBlockEnd"):
+                        correct = content.get("correctAnswers", content.get("correctAnswer", None))
+                        idx     = content.get("questionIndex", content.get("gameBlockIndex", None))
+                        if idx is not None and correct is not None:
+                            # correctAnswers can be a list or int
+                            ans = correct[0] if isinstance(correct, list) else int(correct)
+                            self.answer_map[idx] = ans
+                            if self.stats and "answer_map" in self.stats:
+                                self.stats["answer_map"][idx] = ans
+                            self._log(f"{DIM}Q{idx+1} answer captured: {CHOICE_ICONS[ans % 4]}{R}")
 
                 elif ch == "/service/controller":
                     data  = msg.get("data", {})
                     ctype = data.get("type", "")
                     if ctype == "loginResponse" and not self.joined:
-                        raw_c   = data.get("content", "{}")
-                        content = json.loads(raw_c) if isinstance(raw_c, str) else raw_c
-                        if not str(content).lower().count("duplicate"):
+                        content = self._parse(data.get("content", "{}"))
+                        if "duplicate" not in str(content).lower():
                             self.joined = True
                             if self.stats:
                                 self.stats["joined"] = self.stats.get("joined", 0) + 1
