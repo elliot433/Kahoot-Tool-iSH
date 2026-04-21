@@ -60,16 +60,22 @@ def _py_solve(js: str) -> str:
         if key:
             return key
 
-    # Pattern B: decode.call(this, 'token', function(x) { return expr; })
+    # Pattern B: decode.call(this, 'token', function(x) { ... return expr; })
     tm = re.search(r'decode\.call\(this,\s*["\']([^"\']+)["\']', js)
     fm = re.search(r'function\s*\(\s*(\w+)\s*\)\s*\{(.+?)\}', js, re.DOTALL)
     if tm and fm:
         token_str = tm.group(1)
         param     = fm.group(1)
         body      = fm.group(2)
-        var_vals  = {v.group(1): int(v.group(2))
-                     for v in re.finditer(r'var\s+(\w+)\s*=\s*(\d+)', body)}
-        ret_m     = re.search(r'return\s+(.+?);', body)
+
+        # Collect ALL assignments in order — later ones override earlier ones
+        # This handles: var p = 0; p = 300; (must use 300, not 0)
+        var_vals = {}
+        for v in re.finditer(r'(?:var\s+)?(\w+)\s*=\s*(\d+)\s*;', body):
+            if v.group(1) != param:
+                var_vals[v.group(1)] = int(v.group(2))
+
+        ret_m = re.search(r'return\s+(.+?);', body)
         if ret_m:
             expr_tpl = ret_m.group(1).strip()
             result = ""
@@ -78,8 +84,11 @@ def _py_solve(js: str) -> str:
                 for var, val in var_vals.items():
                     expr = re.sub(r'\b' + var + r'\b', str(val), expr)
                 expr = re.sub(r'\b' + param + r'\b', str(ord(c)), expr)
-                try:    result += chr(int(eval(expr)) % 256)
-                except: result += c
+                try:
+                    v = int(eval(expr)) % 256
+                    result += chr(v)
+                except Exception:
+                    result += c
             if result:
                 return result
     return ""
@@ -105,13 +114,19 @@ var _ = {
     isNaN: isNaN
 };
 """
-        wrap = helpers + js + """
+        wrap = helpers + """
 var res = "";
-try {
+// Try A: challenge JS is a direct expression (decode.call returns the key)
+try { res = (function(){ return (""" + js.replace("\\", "\\\\") + """); })(); } catch(_a) {}
+// Try B: challenge JS defines a 'challenge' var or function
+if (!res || typeof res !== "string") {
+  try {
+    """ + js + """
     if (typeof challenge === "function") res = challenge();
-    else if (typeof challenge === "string") res = challenge;
-} catch(e) {}
-process.stdout.write(String(res));
+    else if (typeof challenge !== "undefined") res = String(challenge);
+  } catch(_b) {}
+}
+process.stdout.write(typeof res === "string" ? res : "");
 """
         out = subprocess.run(["node", "-e", wrap],
                              capture_output=True, text=True, timeout=5)
@@ -194,11 +209,12 @@ def get_session(pin: str):
         session_token = r.headers.get("x-kahoot-session-token", "")
 
         # WebSocket path uses the PIN, not liveGameId
-        # liveGameId is internal routing; PIN is the game identifier in the path
         live_game_id = pin
 
-        # Prefer the explicit session token if Kahoot provides one
-        if session_token:
+        # Token priority:
+        # 1. Challenge-derived XOR token (most reliable when challenge is present)
+        # 2. session_token fallback (when challenge is absent/unsolved)
+        if not key and session_token:
             token = session_token
 
         # Build WebSocket base URL from gameserver header
