@@ -154,13 +154,6 @@ def get_session(pin: str):
         if session_token:
             token = session_token
 
-        # Debug: show challenge solver status
-        solver_ok = bool(key) if challenge_js else None
-        if challenge_js and not key:
-            print(f"  {Y}⚠ challenge not solved — token may be wrong (is nodejs installed?){R}")
-        elif solver_ok:
-            print(f"  {DIM}challenge solved ✓  token: {token[:12]}…{R}")
-
         # Build WebSocket base URL from gameserver header
         if gameserver:
             gs = gameserver.strip().rstrip("/")
@@ -176,6 +169,17 @@ def get_session(pin: str):
             ws_base = "wss://kahoot.it"
 
         cookies = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
+
+        # Debug block — always shown so we can diagnose 403
+        print(f"  {DIM}[debug] challenge_js : {'yes ('+str(len(challenge_js))+' chars)' if challenge_js else 'NONE'}{R}")
+        print(f"  {DIM}[debug] challenge key: {repr(key[:16]) if key else 'EMPTY'}{R}")
+        print(f"  {DIM}[debug] raw_token     : {raw_token[:20]}…{R}")
+        print(f"  {DIM}[debug] session_token : {session_token[:20] if session_token else 'NONE'}{R}")
+        print(f"  {DIM}[debug] token used    : {token[:20]}…{R}")
+        print(f"  {DIM}[debug] gameserver    : {gameserver or 'NONE (using kahoot.it)'}{R}")
+        print(f"  {DIM}[debug] session_id    : {live_game_id}{R}")
+        print(f"  {DIM}[debug] WS URL        : {ws_base}/cometd/{live_game_id}/{token[:12]}…{R}")
+
         return token, live_game_id, ws_base, cookies, None
     except Exception as e:
         return None, None, None, None, str(e)
