@@ -22,6 +22,7 @@ BANNER = f"""
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 SESSION_URL = "https://kahoot.it/reserve/session/{}/?{}"
+QUIZ_URL    = "https://kahoot.it/rest/kahoots/{}"
 WS_URL      = "wss://kahoot.it/cometd/{}/{}"
 UA          = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15"
 HEADERS     = {"User-Agent": UA, "Accept": "application/json", "Origin": "https://kahoot.it"}
@@ -93,34 +94,59 @@ def get_session(pin: str):
     try:
         r = requests.get(SESSION_URL.format(pin, ts), headers=HEADERS, timeout=10)
         if r.status_code == 404:
-            return None, None, "Game not found or not started"
+            return None, None, None, "Game not found or not started"
         if r.status_code != 200:
-            return None, None, f"HTTP {r.status_code}"
+            return None, None, None, f"HTTP {r.status_code}"
         raw_token = r.headers.get("x-authtoken", "")
         data = r.json()
         challenge_js = data.get("challenge", "")
         token = xor_decode(raw_token, solve_challenge(challenge_js)) if challenge_js else raw_token
-        return token, str(data.get("sessionId", pin)), None
+        kahoot_id = data.get("kahootId", data.get("quizId", ""))
+        return token, str(data.get("sessionId", pin)), kahoot_id, None
     except Exception as e:
-        return None, None, str(e)
+        return None, None, None, str(e)
+
+# ── Answer Fetcher ────────────────────────────────────────────────────────────
+def fetch_answers(kahoot_id: str) -> dict:
+    """Fetch correct answer index per question from Kahoot public API."""
+    if not kahoot_id:
+        return {}
+    try:
+        r = requests.get(QUIZ_URL.format(kahoot_id), headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        answers = {}
+        questions = data.get("questions", data.get("kahoot", {}).get("questions", []))
+        for i, q in enumerate(questions):
+            choices = q.get("choices", [])
+            for j, ch in enumerate(choices):
+                if ch.get("correct", False):
+                    answers[i] = j
+                    break
+        return answers
+    except Exception:
+        return {}
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
 class KahootBot:
     def __init__(self, name, token, session_id, pin,
-                 strategy="random", silent=False, stats=None):
-        self.name      = name
-        self.token     = token
-        self.session_id= session_id
-        self.pin       = pin
-        self.strategy  = strategy
-        self.silent    = silent
-        self.stats     = stats      # shared dict for live stats
-        self.ws        = None
-        self.client_id = None
-        self.msg_id    = 0
-        self.joined    = False
-        self.running   = False
-        self.answers   = 0
+                 strategy="random", silent=False, stats=None, answer_map=None):
+        self.name       = name
+        self.token      = token
+        self.session_id = session_id
+        self.pin        = pin
+        self.strategy   = strategy
+        self.silent     = silent
+        self.stats      = stats       # shared dict for live stats
+        self.answer_map = answer_map or {}  # {question_index: correct_choice}
+        self.ws         = None
+        self.client_id  = None
+        self.msg_id     = 0
+        self.joined     = False
+        self.running    = False
+        self.answers    = 0
+        self.correct    = 0
 
     def _log(self, msg):
         if not self.silent:
@@ -189,7 +215,9 @@ class KahootBot:
         if self.stats:
             self.stats["answers"] = self.stats.get("answers", 0) + 1
 
-    def _pick(self, n=4):
+    def _pick(self, n=4, idx=0):
+        if self.strategy == "correct" and idx in self.answer_map:
+            return self.answer_map[idx]
         m = {"first":0,"second":1,"third":2,"fourth":3}
         return m.get(self.strategy, random.randint(0, n-1))
 
@@ -217,14 +245,18 @@ class KahootBot:
                             if self.stats:
                                 self.stats["joined"] = self.stats.get("joined", 0) + 1
                             self._log(f"{G}joined ✓{R}")
-                        n    = content.get("numberOfChoices", 4)
-                        idx  = content.get("questionIndex", 0)
-                        pick = self._pick(n)
-                        delay = random.uniform(0.4, 3.0)
+                        n     = content.get("numberOfChoices", 4)
+                        idx   = content.get("questionIndex", 0)
+                        pick  = self._pick(n, idx)
+                        is_correct = idx in self.answer_map and self.answer_map[idx] == pick
+                        if is_correct:
+                            self.correct += 1
+                        delay = random.uniform(0.4, 2.5)
                         time.sleep(delay)
                         self._answer(pick, idx)
-                        icon = CHOICE_ICONS[pick % 4]
-                        self._log(f"Q{idx+1} → {icon}  {DIM}({delay:.1f}s){R}")
+                        icon  = CHOICE_ICONS[pick % 4]
+                        check = f"{G}✓{R}" if is_correct else f"{DIM}?{R}"
+                        self._log(f"Q{idx+1} → {icon} {check}  {DIM}({delay:.1f}s){R}")
 
                 elif ch == "/service/controller":
                     data  = msg.get("data", {})
@@ -279,35 +311,54 @@ def error(msg):   print(f"  {RD}✗ {msg}{R}"); sys.exit(1)
 def info(msg):    print(f"  {BL}→ {msg}{R}")
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
-def mode_auto(pin, token, session_id):
+def mode_auto(pin, token, session_id, answer_map=None):
+    answer_map = answer_map or {}
     divider("AUTO-ANSWER")
     name = prompt("Your player name:") or "KahootBot"
-    print(f"\n  Strategy:\n"
-          f"  {W}1{R} Random answer\n"
-          f"  {W}2{R} Always 🔴 first\n"
-          f"  {W}3{R} Always 🔵 second\n"
-          f"  {W}4{R} Always 🟡 third\n"
-          f"  {W}5{R} Always 🟢 fourth\n")
-    s = {"1":"random","2":"first","3":"second","4":"third","5":"fourth"}
-    strategy = s.get(prompt("Choice [1-5]:"), "random")
+
+    has_answers = bool(answer_map)
+    print(f"\n  Strategy:")
+    if has_answers:
+        print(f"  {W}1{R} {G}{B}Always correct ✓{R}  {DIM}(answers loaded){R}")
+    else:
+        print(f"  {W}1{R} {DIM}Always correct  (unavailable — private quiz){R}")
+    print(f"  {W}2{R} Random answer")
+    print(f"  {W}3{R} Always 🔴 first")
+    print(f"  {W}4{R} Always 🔵 second\n")
+
+    raw = prompt("Choice [1-4]:")
+    if raw == "1" and has_answers:
+        strategy = "correct"
+    elif raw == "3":
+        strategy = "first"
+    elif raw == "4":
+        strategy = "second"
+    else:
+        strategy = "random"
+
     divider()
-    info(f"Joining as {M}{B}{name}{R} — strategy: {Y}{strategy}{R}")
-    bot = KahootBot(name, token, session_id, pin, strategy=strategy)
+    label = f"{G}correct answers{R}" if strategy == "correct" else f"{Y}{strategy}{R}"
+    info(f"Joining as {M}{B}{name}{R} — {label}")
+    bot = KahootBot(name, token, session_id, pin,
+                    strategy=strategy, answer_map=answer_map)
     try:
         bot.run()
     except KeyboardInterrupt:
         bot.stop()
-        print(f"\n  {Y}Stopped. Answers given: {bot.answers}{R}")
+        print(f"\n  {Y}Stopped — answers: {bot.answers}  correct: {G}{bot.correct}{R}")
 
 
-def mode_flood(pin, token, session_id):
+def mode_flood(pin, token, session_id, answer_map=None):
+    answer_map = answer_map or {}
     divider("FLOOD MODE")
     prefix = prompt("Name prefix (empty = random funny names):")
     try:    count = int(prompt("Bot count [default 30]:") or "30")
     except: count = 30
     count = min(max(count, 1), 200)
+    strategy = "correct" if answer_map else "random"
     divider()
-    info(f"Launching {Y}{count}{R} bots...")
+    label = f"{G}correct answers{R}" if strategy == "correct" else f"{Y}random{R}"
+    info(f"Launching {Y}{count}{R} bots — strategy: {label}")
 
     stats   = {"joined": 0, "answers": 0}
     bots    = []
@@ -320,7 +371,8 @@ def mode_flood(pin, token, session_id):
                 break
             name = rname(prefix)
             bot  = KahootBot(name, token, session_id, pin,
-                             strategy="random", silent=(count > 8), stats=stats)
+                             strategy=strategy, silent=(count > 8),
+                             stats=stats, answer_map=answer_map)
             bots.append(bot)
             t = threading.Thread(target=bot.run, daemon=True)
             threads.append(t)
@@ -397,11 +449,23 @@ def main():
 
     print()
     info("Checking game...")
-    token, session_id, err = get_session(pin)
+    token, session_id, kahoot_id, err = get_session(pin)
     if err:
         error(err)
 
     success(f"Game found!  Session: {DIM}{session_id}{R}")
+
+    # Try to load correct answers
+    answer_map = {}
+    if kahoot_id:
+        info("Fetching quiz answers...")
+        answer_map = fetch_answers(kahoot_id)
+        if answer_map:
+            success(f"Loaded {G}{len(answer_map)}{R} correct answers!")
+        else:
+            print(f"  {Y}⚠ Answers not available (private quiz){R}")
+    else:
+        print(f"  {Y}⚠ Quiz ID not found — answers unavailable{R}")
 
     divider("SELECT MODE")
     print(f"\n  {W}{B}1{R}  ⚡ Auto-Answer  {DIM}join & answer every question{R}")
@@ -411,9 +475,9 @@ def main():
     choice = prompt("Mode [1/2/3]:")
 
     if choice == "1":
-        mode_auto(pin, token, session_id)
+        mode_auto(pin, token, session_id, answer_map)
     elif choice == "2":
-        mode_flood(pin, token, session_id)
+        mode_flood(pin, token, session_id, answer_map)
     elif choice == "3":
         mode_spam(pin, token, session_id)
     else:
