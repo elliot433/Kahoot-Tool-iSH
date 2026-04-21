@@ -118,17 +118,12 @@ def get_session(pin: str):
         key = solve_challenge(challenge_js) if challenge_js else ""
         token = xor_decode(decoded_token, key) if key else decoded_token
         print(f"  {DIM}[dbg] token (first 12): '{token[:12]}...'{R}")
-        # Try all known field names for quiz ID
-        kahoot_id = (data.get("kahootId") or data.get("quizId") or
-                     data.get("quiz", {}).get("uuid") or
-                     data.get("quiz", {}).get("id") or
-                     data.get("gameId") or "")
-        # Debug: show available keys
-        _dbg_keys = [k for k in data.keys() if k not in ("challenge",)]
-        print(f"  {DIM}[dbg] session keys: {_dbg_keys}{R}")
-        print(f"  {DIM}[dbg] kahoot_id: '{kahoot_id}'{R}")
+        # liveGameId is the real session ID for the WebSocket URL
+        session_id = str(data.get("liveGameId") or data.get("sessionId") or pin)
+        kahoot_id = ""  # Kahoot no longer exposes quiz UUID in session
         cookies = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
-        return token, str(data.get("sessionId", pin)), kahoot_id, cookies, None
+        print(f"  {DIM}[dbg] liveGameId={session_id}  token={token[:10]}...{R}")
+        return token, session_id, kahoot_id, cookies, None
     except Exception as e:
         return None, None, None, None, str(e)
 
@@ -354,28 +349,18 @@ def mode_auto(pin, token, session_id, answer_map=None, cookies=""):
     divider("AUTO-ANSWER")
     name = prompt("Your player name:") or "KahootBot"
 
-    has_answers = bool(answer_map)
     print(f"\n  Strategy:")
-    if has_answers:
-        print(f"  {W}1{R} {G}{B}Always correct ✓{R}  {DIM}(answers loaded){R}")
-    else:
-        print(f"  {W}1{R} {DIM}Always correct  (unavailable — private quiz){R}")
-    print(f"  {W}2{R} Random answer")
-    print(f"  {W}3{R} Always 🔴 first")
-    print(f"  {W}4{R} Always 🔵 second\n")
+    print(f"  {W}1{R} Random answer")
+    print(f"  {W}2{R} Always 🔴 first")
+    print(f"  {W}3{R} Always 🔵 second")
+    print(f"  {W}4{R} Always 🟡 third")
+    print(f"  {W}5{R} Always 🟢 fourth\n")
 
-    raw = prompt("Choice [1-4]:")
-    if raw == "1" and has_answers:
-        strategy = "correct"
-    elif raw == "3":
-        strategy = "first"
-    elif raw == "4":
-        strategy = "second"
-    else:
-        strategy = "random"
+    raw = prompt("Choice [1-5]:")
+    strategy = {"2":"first","3":"second","4":"third","5":"fourth"}.get(raw, "random")
 
     divider()
-    label = f"{G}correct answers{R}" if strategy == "correct" else f"{Y}{strategy}{R}"
+    label = f"{Y}{strategy}{R}"
     info(f"Joining as {M}{B}{name}{R} — {label}")
     bot = KahootBot(name, token, session_id, pin,
                     strategy=strategy, answer_map=answer_map, cookies=cookies)
@@ -491,17 +476,7 @@ def main():
 
     success(f"Game found!  Session: {DIM}{session_id}{R}")
 
-    # Try to load correct answers
     answer_map = {}
-    if kahoot_id:
-        info("Fetching quiz answers...")
-        answer_map = fetch_answers(kahoot_id)
-        if answer_map:
-            success(f"Loaded {G}{len(answer_map)}{R} correct answers!")
-        else:
-            print(f"  {Y}⚠ Answers not available (private quiz){R}")
-    else:
-        print(f"  {Y}⚠ Quiz ID not found — answers unavailable{R}")
 
     divider("SELECT MODE")
     print(f"\n  {W}{B}1{R}  ⚡ Auto-Answer  {DIM}join & answer every question{R}")
