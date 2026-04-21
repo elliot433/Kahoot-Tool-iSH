@@ -111,8 +111,15 @@ def get_session(pin: str):
         data = r.json()
         challenge_js = data.get("challenge", "")
         token = xor_decode(raw_token, solve_challenge(challenge_js)) if challenge_js else raw_token
-        kahoot_id = data.get("kahootId", data.get("quizId", ""))
-        # Build cookie string to pass to WebSocket
+        # Try all known field names for quiz ID
+        kahoot_id = (data.get("kahootId") or data.get("quizId") or
+                     data.get("quiz", {}).get("uuid") or
+                     data.get("quiz", {}).get("id") or
+                     data.get("gameId") or "")
+        # Debug: show available keys
+        _dbg_keys = [k for k in data.keys() if k not in ("challenge",)]
+        print(f"  {DIM}[dbg] session keys: {_dbg_keys}{R}")
+        print(f"  {DIM}[dbg] kahoot_id: '{kahoot_id}'{R}")
         cookies = "; ".join(f"{k}={v}" for k, v in _session.cookies.items())
         return token, str(data.get("sessionId", pin)), kahoot_id, cookies, None
     except Exception as e:
