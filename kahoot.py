@@ -45,18 +45,38 @@ FUNNY_NAMES = [
 
 # ── Challenge Solver ──────────────────────────────────────────────────────────
 def solve_challenge(js: str) -> str:
-    # Primary: let Node.js run the actual JS
+    # Primary: Node.js with Kahoot helper stubs injected
     try:
-        wrap = js + """
+        helpers = r"""
+// Kahoot challenge helpers
+function decode(token, solver) {
+    var r = '';
+    for (var i = 0; i < token.length; i++) {
+        r += String.fromCharCode(solver(token.charCodeAt(i)));
+    }
+    return r;
+}
+var _ = {
+    map: function(col, fn) {
+        if (typeof col === 'string') col = col.split('');
+        return col.map(fn);
+    },
+    replace: function(s, re, fn) { return s.replace(re, fn); },
+    isNaN: isNaN
+};
+"""
+        wrap = helpers + js + """
 var res = "";
-if (typeof challenge === "function") { res = challenge(); }
-else if (typeof challenge === "string") { res = challenge; }
+try {
+    if (typeof challenge === "function") res = challenge();
+    else if (typeof challenge === "string") res = challenge;
+} catch(e) {}
 process.stdout.write(String(res));
 """
         out = subprocess.run(["node", "-e", wrap],
                              capture_output=True, text=True, timeout=5)
-        if out.returncode == 0 and out.stdout:
-            return out.stdout
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
     except Exception:
         pass
 
@@ -133,6 +153,13 @@ def get_session(pin: str):
         # Prefer the explicit session token if Kahoot provides one
         if session_token:
             token = session_token
+
+        # Debug: show challenge solver status
+        solver_ok = bool(key) if challenge_js else None
+        if challenge_js and not key:
+            print(f"  {Y}⚠ challenge not solved — token may be wrong (is nodejs installed?){R}")
+        elif solver_ok:
+            print(f"  {DIM}challenge solved ✓  token: {token[:12]}…{R}")
 
         # Build WebSocket base URL from gameserver header
         if gameserver:
