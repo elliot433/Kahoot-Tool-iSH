@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import os, re, sys, json, time, random, threading, subprocess, requests, websocket
+import os, re, sys, json, time, random, threading, subprocess, ssl, requests, websocket
 requests.packages.urllib3.disable_warnings()
+websocket.enableTrace(False)
 
 # ── ANSI ─────────────────────────────────────────────────────────────────────
 R="\033[0m"; B="\033[1m"; DIM="\033[2m"
@@ -278,12 +279,15 @@ class KahootBot:
 
     def run(self):
         self.running = True
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
         self.ws = websocket.WebSocketApp(
             WS_URL.format(self.session_id, self.token),
             header={"Origin": "https://kahoot.it"},
             on_open=self.on_open, on_message=self.on_message,
             on_error=self.on_error, on_close=self.on_close)
-        self.ws.run_forever(ping_interval=25)
+        self.ws.run_forever(sslopt={"context": ssl_ctx})
 
     def stop(self):
         self.running = False
